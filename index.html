@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Offload Remotely | Approval</title>
+<style>
+  :root { --teal:#148b89; --ink:#183e49; --mute:#637b80; --line:#d9e4e6; --bg:#f6f9f9; --warn:#b3261e; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:'Century Gothic',CenturyGothic,AppleGothic,Arial,sans-serif; font-size:11pt; line-height:1.5; }
+  .wrap { max-width:760px; margin:0 auto; padding:20px 16px 60px; }
+  h1 { color:var(--teal); font-size:15pt; margin:8px 0 2px; }
+  .sub { color:var(--mute); margin:0 0 18px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin:0 0 14px; }
+  .card.off { opacity:.6; }
+  .row { display:flex; gap:10px; align-items:flex-start; }
+  .row input[type=checkbox] { margin-top:5px; width:18px; height:18px; flex:none; }
+  .who { font-weight:bold; }
+  .meta { color:var(--mute); font-size:10pt; }
+  .subject { margin:10px 0 4px; font-weight:bold; }
+  .body { white-space:pre-wrap; border-left:3px solid var(--teal); padding:2px 0 2px 12px; margin:6px 0 0; }
+  .tag { display:inline-block; font-size:9pt; padding:1px 8px; border-radius:10px; background:#e3f3f2; color:var(--teal); margin-left:6px; }
+  .tag.bad { background:#fbe9e7; color:var(--warn); }
+  textarea { width:100%; min-height:110px; padding:10px; font:inherit; border:1px solid var(--line); border-radius:6px; }
+  button { background:var(--teal); color:#fff; border:0; border-radius:6px; padding:12px 20px; font:inherit; font-weight:bold; cursor:pointer; }
+  button.danger { background:var(--warn); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .note { color:var(--mute); font-size:10pt; margin:10px 0 0; }
+  .msg { background:#fff; border:1px solid var(--line); border-radius:8px; padding:18px; }
+  .err { color:var(--warn); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Offload Remotely</h1>
+  <p class="sub" id="sub">Outreach approval</p>
+  <div id="app"><div class="msg">Loading…</div></div>
+</div>
+<script>
+(function () {
+  // Public values by design: the project URL and the publishable key can only call the two guarded functions.
+  var SUPABASE_URL = 'https://lovugfxetgdgxmwxmstz.supabase.co';
+  var PUBLISHABLE_KEY = 'sb_publishable_47TrmZCifn0SRtWcTMgQig_tQcPS7h9';
+
+  var app = document.getElementById('app');
+  var sub = document.getElementById('sub');
+  var LABELS = {
+    approve_all: 'Approve drafts', approve_one: 'Approve this draft',
+    reject_all: 'Reject drafts', reject_one: 'Reject this draft',
+    request_changes: 'Request changes'
+  };
+
+  function el(tag, props, kids) {
+    var n = document.createElement(tag);
+    Object.keys(props || {}).forEach(function (k) {
+      if (k === 'text') n.textContent = props[k];
+      else if (k === 'class') n.className = props[k];
+      else n.setAttribute(k, props[k]);
+    });
+    (kids || []).forEach(function (c) { if (c) n.appendChild(c); });
+    return n;
+  }
+  function show(node) { app.replaceChildren(node); }
+  function message(text, isErr) { show(el('div', { class: 'msg' + (isErr ? ' err' : ''), text: text })); }
+
+  async function sha256Hex(s) {
+    var buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+    return Array.from(new Uint8Array(buf)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+  }
+  async function rpc(fn, args) {
+    var r = await fetch(SUPABASE_URL + '/rest/v1/rpc/' + fn, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': PUBLISHABLE_KEY },
+      body: JSON.stringify(args)
+    });
+    if (!r.ok) throw new Error('Request failed (' + r.status + ')');
+    return r.json();
+  }
+  var ERR = {
+    invalid: 'This approval link is not valid.',
+    already_used: 'This link has already been used. No further action was taken.',
+    expired: 'This link has expired. Please use the link in your latest digest.',
+    subset_not_allowed: 'This link cannot be used to select individual drafts.'
+  };
+
+  function card(it, withCheck, checked) {
+    var ok = it.eligible || !(withCheck === 'approve');
+    var head = el('div', {}, [
+      el('span', { class: 'who', text: it.contact + ' — ' + it.company }),
+      withCheck === 'approve' ? el('span', { class: 'tag' + (it.eligible ? '' : ' bad'), text: it.eligible ? 'eligible' : 'not eligible' }) : null,
+      el('div', { class: 'meta', text: (it.title || '') + ' · ' + it.email })
+    ]);
+    var inner = el('div', { style: 'flex:1;min-width:0' }, [
+      head,
+      el('div', { class: 'subject', text: 'Subject: ' + it.subject }),
+      el('div', { class: 'body', text: it.body })
+    ]);
+    var row = el('div', { class: 'row' }, []);
+    var cb = null;
+    if (withCheck) {
+      cb = el('input', { type: 'checkbox', 'data-id': it.message_id });
+      cb.checked = !!checked && ok;
+      cb.disabled = !ok;
+      row.appendChild(cb);
+    }
+    row.appendChild(inner);
+    return { node: el('div', { class: 'card' + (ok ? '' : ' off') }, [row]), cb: cb };
+  }
+
+  async function main() {
+    var token = (location.hash || '').replace(/^#/, '').replace(/[^a-f0-9]/g, '');
+    if (!token) return message(ERR.invalid, true);
+    var hash = await sha256Hex(token);
+    var pv;
+    try { pv = await rpc('public_approval_preview', { p_token_hash: hash }); }
+    catch (e) { return message('Could not reach the approval service. Please try again.', true); }
+    if (!pv.ok) return message(ERR[pv.error] || ERR.invalid, true);
+
+    var action = pv.action;
+    var items = pv.items || [];
+    sub.textContent = (LABELS[action] || 'Approval') + ' · digest ' + (pv.digest_date || '');
+    var isApprove = action === 'approve_all' || action === 'approve_one';
+    var isSubset = action === 'approve_all' || action === 'reject_all';
+    var checks = [];
+    var wrap = el('div', {});
+
+    items.forEach(function (it) {
+      var c = card(it, isSubset ? (isApprove ? 'approve' : 'reject') : null, true);
+      if (c.cb) checks.push(c.cb);
+      wrap.appendChild(c.node);
+    });
+    if (!items.length) return message('There are no drafts attached to this link.', true);
+
+    var noteBox = null;
+    if (action === 'request_changes') {
+      noteBox = el('textarea', { placeholder: 'What should change?', required: 'required' });
+      wrap.appendChild(el('div', { class: 'card' }, [noteBox]));
+    }
+
+    var btn = el('button', { type: 'button', text: 'Confirm' });
+    if (!isApprove) btn.className = 'danger';
+    function refresh() {
+      if (isSubset) {
+        var n = checks.filter(function (c) { return c.checked; }).length;
+        btn.textContent = 'Confirm ' + (isApprove ? 'approval' : 'rejection') + ' of ' + n + ' draft' + (n === 1 ? '' : 's');
+        btn.disabled = n === 0;
+      } else if (action === 'request_changes') {
+        btn.textContent = 'Confirm request for changes';
+        btn.disabled = !noteBox.value.trim();
+      } else {
+        btn.textContent = isApprove ? 'Confirm approval' : 'Confirm rejection';
+      }
+    }
+    checks.forEach(function (c) { c.addEventListener('change', refresh); });
+    if (noteBox) noteBox.addEventListener('input', refresh);
+    refresh();
+
+    btn.addEventListener('click', async function () {
+      btn.disabled = true; btn.textContent = 'Saving…';
+      var ids = null;
+      if (isSubset) ids = checks.filter(function (c) { return c.checked; }).map(function (c) { return c.getAttribute('data-id'); });
+      try {
+        var res = await rpc('public_confirm_approval', { p_token_hash: hash, p_message_ids: ids, p_note: noteBox ? noteBox.value.trim() : null });
+        if (!res.ok) return message(ERR[res.error] || 'Could not record the decision.', true);
+        var done = {
+          approve_all: 'Approved', approve_one: 'Approved', reject_all: 'Rejected', reject_one: 'Rejected', request_changes: 'Changes requested'
+        }[res.action] || 'Recorded';
+        var n = res.affected;
+        var text = done + ': ' + n + ' draft' + (n === 1 ? '' : 's') + '.';
+        if (isApprove && ids && n < ids.length) text += ' ' + (ids.length - n) + ' selected draft(s) were skipped because they are no longer eligible.';
+        if (isApprove && !ids && n === 0) text = 'No drafts were approved: they are no longer eligible or were already decided.';
+        sub.textContent = 'Decision recorded';
+        message(text + ' Nothing is sent until the sending step runs. You can close this page.');
+      } catch (e) {
+        message('Could not record the decision. Please reload this page and try again.', true);
+      }
+    });
+
+    wrap.appendChild(btn);
+    wrap.appendChild(el('p', { class: 'note', text: 'Opening this page records nothing. A decision is saved only when you press Confirm.' }));
+    show(wrap);
+  }
+  main();
+})();
+</script>
+</body>
+</html>
