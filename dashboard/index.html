@@ -33,6 +33,21 @@
   .when { color:var(--ok); font-weight:bold; margin-top:6px; }
   .msg { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; }
   .err { color:var(--warn); }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:10px; margin:12px 0 4px; }
+  .kpi { background:#fff; border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .kpi .n { font-size:18pt; font-weight:bold; color:var(--ink); line-height:1.2; }
+  .pill { display:inline-flex; align-items:center; gap:6px; border-radius:8px; padding:6px 12px; font:inherit; font-size:10pt; border:0; cursor:pointer; }
+  .pill.paused { background:#fff3d6; color:#7a5200; }
+  .pill.live { background:#dff3e7; color:#14663a; }
+  .why { background:var(--bg); border-radius:8px; padding:8px 12px; margin:8px 0; font-size:10pt; }
+  .why b { color:var(--ink); }
+  .why a { color:var(--teal); }
+  .tag.ok { background:#dff3e7; color:#14663a; }
+  .tag.info { background:#e3f3f2; color:var(--teal); }
+  .tag.neutral { background:#eef2f3; color:var(--mute); }
+  .link { background:none; border:0; color:var(--teal); cursor:pointer; font:inherit; padding:0; }
+  input.txt, textarea.txt { width:100%; font:inherit; padding:8px 10px; border:1px solid var(--line); border-radius:6px; margin:4px 0; }
+  textarea.txt { min-height:220px; }
   .toast { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); background:var(--ink); color:#fff; padding:10px 16px; border-radius:8px; max-width:90%; }
 </style>
 </head>
@@ -40,8 +55,9 @@
 <div class="wrap">
   <header>
     <div><h1>Outreach Dashboard</h1><div class="small">Offload Remotely · private</div></div>
-    <div><button class="act ghost" id="refresh">Refresh</button> <button class="act ghost" id="signout">Sign out</button></div>
+    <div id="pausebox"></div><div><button class="act ghost" id="refresh">Refresh</button> <button class="act ghost" id="signout">Sign out</button></div>
   </header>
+  <div id="kpis"></div>
   <div class="tabs" id="tabs"></div>
   <div id="view"><div class="msg">Loading…</div></div>
 </div>
@@ -102,19 +118,86 @@
       tabsEl.appendChild(b);
     });
   }
+  function safeLinks(arr) {
+    var out = [];
+    (Array.isArray(arr) ? arr : []).forEach(function (u) { if (typeof u === 'string' && /^https:\/\//.test(u)) out.push(u); });
+    return out.slice(0, 3);
+  }
+  function host(u) { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return 'source'; } }
+  function why(it) {
+    var parts = [];
+    if (it.hiring_signal) parts.push(['Signal', it.hiring_signal]);
+    if (it.employee_count) parts.push(['Size', it.employee_count + ' staff (as listed)']);
+    if (!parts.length) return null;
+    var box = el('div', { class: 'why' }, [el('b', { text: 'Why this prospect' })]);
+    parts.forEach(function (p) { box.appendChild(el('div', { text: p[0] + ': ' + p[1] })); });
+    var links = safeLinks(it.sources);
+    if (links.length) {
+      var line = el('div', { class: 'small' }, [document.createTextNode('Sources: ')]);
+      links.forEach(function (u, i) { if (i) line.appendChild(document.createTextNode(' · ')); line.appendChild(el('a', { href: u, target: '_blank', rel: 'noopener noreferrer', text: host(u) })); });
+      box.appendChild(line);
+    }
+    return box;
+  }
+  function badges(it) {
+    var b = [];
+    if (it.verification_status === 'valid') b.push(el('span', { class: 'tag ok', text: 'Email verified' + (it.reoon_score ? ' · Reoon ' + it.reoon_status + ' ' + it.reoon_score : '') }));
+    else b.push(el('span', { class: 'tag bad', text: 'Email not verified' }));
+    b.push(el('span', { class: 'tag neutral', text: it.contacted_before ? 'Contacted before' : 'Not contacted before' }));
+    return b;
+  }
+  function editor(it, done) {
+    var subj = el('input', { class: 'txt', type: 'text', maxlength: '200' }); subj.value = it.subject || '';
+    var body = el('textarea', { class: 'txt' }); body.value = it.body || '';
+    var save = el('button', { class: 'act', type: 'button', text: 'Save changes' });
+    var cancel = el('button', { class: 'act ghost', type: 'button', text: 'Cancel' });
+    cancel.addEventListener('click', function () { done(false); });
+    save.addEventListener('click', async function () {
+      if (!subj.value.trim() || !body.value.trim()) { toast('Subject and message cannot be empty'); return; }
+      var warn = (it.status === 'approved') ? 'This email is approved. Saving cancels the approval and sends it back to Drafts.\n\n' : '';
+      if (!window.confirm(warn + 'Save your changes?')) return;
+      save.disabled = true;
+      try {
+        var r = await rpc('dash_edit', { p_key_hash: state.hash, p_message_id: it.message_id, p_subject: subj.value, p_body: body.value });
+        if (!r.ok) { toast('Could not save: ' + (r.error || 'unknown')); save.disabled = false; return; }
+        toast('Saved. The email is back in Drafts and needs approval.'); done(true);
+      } catch (e) { toast('Could not save. Please try again.'); save.disabled = false; }
+    });
+    return el('div', {}, [el('div', { class: 'small', text: 'Subject' }), subj, el('div', { class: 'small', text: 'Message (your signature is added when sending)' }), body, el('div', { class: 'bar' }, [save, cancel])]);
+  }
   function card(it, opts) {
     var head = el('div', {}, [
       el('span', { class: 'who', text: (it.contact || 'Unknown') + ' — ' + (it.company || '') }),
-      opts.eligibility ? el('span', { class: 'tag' + (it.eligible ? '' : ' bad'), text: it.eligible ? 'ready to approve' : 'not eligible (email not verified)' }) : null,
+      opts.eligibility ? el('span', { class: 'tag' + (it.eligible ? '' : ' bad'), text: it.eligible ? 'ready to approve' : 'not eligible' }) : null,
       el('div', { class: 'small', text: (it.title || '') + ' · ' + (it.email || '') + (it.location ? ' · ' + it.location : '') })
     ]);
-    var inner = el('div', { style: 'flex:1;min-width:0' }, [head, el('div', { class: 'subject', text: 'Subject: ' + (it.subject || '') }), el('div', { class: 'body', text: it.body || '' })]);
+    var inner = el('div', { style: 'flex:1;min-width:0' }, [head]);
+    if (opts.badges) { var bw = el('div', { style: 'margin:6px 0' }); badges(it).forEach(function (x) { bw.appendChild(x); bw.appendChild(document.createTextNode(' ')); }); inner.appendChild(bw); }
+    if (opts.why) { var w = why(it); if (w) inner.appendChild(w); }
+    var content = el('div', {});
+    function showView() {
+      content.replaceChildren();
+      content.appendChild(el('div', { class: 'subject', text: 'Subject: ' + (it.subject || '') }));
+      var full = (it.body || '');
+      var long = full.length > 260 && opts.collapse;
+      var b = el('div', { class: 'body', text: long ? full.slice(0, 260).replace(/\s+\S*$/, '') + '…' : full });
+      content.appendChild(b);
+      var row = el('div', { class: 'bar', style: 'margin-top:8px' });
+      if (long) {
+        var open = false; var t = el('button', { class: 'link', type: 'button', text: 'Show full email' });
+        t.addEventListener('click', function () { open = !open; b.textContent = open ? full : full.slice(0, 260).replace(/\s+\S*$/, '') + '…'; t.textContent = open ? 'Show less' : 'Show full email'; });
+        row.appendChild(t);
+      }
+      if (opts.edit) { var e = el('button', { class: 'link', type: 'button', text: 'Edit' }); e.addEventListener('click', function () { content.replaceChildren(editor(it, function (saved) { if (saved) load(); else showView(); })); }); row.appendChild(e); }
+      content.appendChild(row);
+    }
+    showView();
+    inner.appendChild(content);
     if (it.founder_note) inner.appendChild(el('div', { class: 'small', text: 'Your note: ' + it.founder_note }));
     if (opts.when) inner.appendChild(el('div', { class: 'when', text: opts.when }));
     var row = el('div', { class: 'row' });
-    var cb = null;
     if (opts.select) {
-      cb = el('input', { type: 'checkbox' });
+      var cb = el('input', { type: 'checkbox' });
       cb.disabled = !!opts.disabled;
       cb.checked = !!state.sel[it.message_id];
       cb.addEventListener('change', function () { state.sel[it.message_id] = cb.checked; updateBar(); });
@@ -122,6 +205,34 @@
     }
     row.appendChild(inner);
     return el('div', { class: 'card' }, [row]);
+  }
+  function renderKpis() {
+    var box = document.getElementById('kpis'); box.replaceChildren();
+    var s = state.data && state.data.summary; if (!s) return;
+    var g = el('div', { class: 'kpis' });
+    [['Found', s.found], ['Verified', s.verified], ['Drafted', s.drafted], ['Sent', s.sent], ['Replies', s.replies]].forEach(function (k) {
+      g.appendChild(el('div', { class: 'kpi' }, [el('div', { class: 'small', text: k[0] }), el('div', { class: 'n', text: String(k[1]) })]));
+    });
+    box.appendChild(g);
+    var need = (state.data.counts.drafts || 0);
+    box.appendChild(el('div', { class: 'small', style: 'margin:6px 0 0', text: need ? need + ' draft' + (need === 1 ? '' : 's') + ' need' + (need === 1 ? 's' : '') + ' you today. Found and Verified count all fresh-batch research and all verified contacts.' : 'Nothing needs you right now.' }));
+  }
+  function renderPause() {
+    var box = document.getElementById('pausebox'); box.replaceChildren();
+    var st = state.data && state.data.settings; if (!st) return;
+    var b = el('button', { type: 'button', class: 'pill ' + (st.paused ? 'paused' : 'live'), text: st.paused ? 'Sending paused' : 'Sending live (' + st.sent_24h + ' of ' + st.daily_cap + ' today)' });
+    b.title = st.paused ? 'Click to resume sending' : 'Click to pause all sending';
+    b.addEventListener('click', async function () {
+      var pausing = !st.paused;
+      var msg = pausing ? 'Pause all sending now?' : 'Resume sending? Approved emails can then be sent when Claude is told to send. Daily cap: ' + st.daily_cap + '.';
+      if (!window.confirm(msg)) return;
+      try {
+        var r = await rpc('dash_set_pause', { p_key_hash: state.hash, p_paused: pausing, p_cap: null });
+        if (!r.ok) { toast('Could not change the setting'); return; }
+        toast(pausing ? 'Sending paused' : 'Sending resumed'); load();
+      } catch (e) { toast('Could not change the setting'); }
+    });
+    box.appendChild(b);
   }
   function selected() { return Object.keys(state.sel).filter(function (k) { return state.sel[k]; }); }
   var barBtns = [];
@@ -163,7 +274,7 @@
   function empty(t) { return el('div', { class: 'msg', text: t }); }
 
   function render() {
-    renderTabs();
+    renderTabs(); renderKpis(); renderPause();
     var list = items(state.tab);
     var wrap = el('div');
     if (state.tab === 'drafts') {
@@ -174,31 +285,31 @@
         { label: 'Reject selected', cls: 'warn', needsSel: true, fn: function () { decide('reject', 'Reject', false); } }
       ]));
       if (!list.length) wrap.appendChild(empty('No drafts waiting. Ask Claude to "run today\'s batch".'));
-      list.forEach(function (i) { wrap.appendChild(card(i, { select: true, disabled: !i.eligible, eligibility: true })); });
+      list.forEach(function (i) { wrap.appendChild(card(i, { select: true, eligibility: true, badges: true, why: true, collapse: true, edit: true })); });
     } else if (state.tab === 'approved') {
       wrap.appendChild(bar([
         { label: 'Schedule all approved', fn: scheduleAll },
         { label: 'Move back to drafts', cls: 'ghost', needsSel: true, fn: function () { decide('unapprove', 'Move back to drafts:', false); } }
       ]));
       if (!list.length) wrap.appendChild(empty('Nothing approved and waiting for a time.'));
-      list.forEach(function (i) { wrap.appendChild(card(i, { select: true })); });
+      list.forEach(function (i) { wrap.appendChild(card(i, { select: true, badges: true, why: true, collapse: true, edit: true })); });
     } else if (state.tab === 'scheduled') {
       wrap.appendChild(bar([{ label: 'Move back to drafts', cls: 'ghost', needsSel: true, fn: function () { decide('unapprove', 'Move back to drafts:', false); } }]));
       wrap.appendChild(el('p', { class: 'small', text: 'Planned for 9:30 AM in the recipient\'s time zone, Tuesday to Thursday, 15 minutes apart. Nothing is sent until Claude is told to send.' }));
       if (!list.length) wrap.appendChild(empty('Nothing scheduled.'));
       list.forEach(function (i) {
         var w = 'Planned: ' + fmt(i.scheduled_send_at, i.tz || 'UTC') + ' ' + city(i.tz) + ' time · ' + fmt(i.scheduled_send_at, 'Asia/Karachi') + ' your time (Karachi)';
-        wrap.appendChild(card(i, { select: true, when: w }));
+        wrap.appendChild(card(i, { select: true, when: w, badges: true, why: true, collapse: true, edit: true }));
       });
     } else if (state.tab === 'sent') {
       if (!list.length) wrap.appendChild(empty('Nothing sent yet.'));
       list.slice().reverse().forEach(function (i) {
-        wrap.appendChild(card(i, { when: i.sent_at ? 'Sent: ' + fmt(i.sent_at, 'Asia/Karachi') + ' (Karachi)' : 'Sending…' }));
+        wrap.appendChild(card(i, { collapse: true, when: i.sent_at ? 'Sent: ' + fmt(i.sent_at, 'Asia/Karachi') + ' (Karachi)' : 'Sending…' }));
       });
     } else {
       if (!list.length) wrap.appendChild(empty('No replies yet. Tell Claude "check replies" and they will appear here.'));
       list.slice().reverse().forEach(function (i) {
-        wrap.appendChild(card(i, { when: (i.reply_class ? i.reply_class + ' · ' : '') + (i.received_at ? 'Received: ' + fmt(i.received_at, 'Asia/Karachi') + ' (Karachi)' : '') }));
+        wrap.appendChild(card(i, { collapse: false, when: (i.reply_class ? i.reply_class + ' · ' : '') + (i.received_at ? 'Received: ' + fmt(i.received_at, 'Asia/Karachi') + ' (Karachi)' : '') }));
       });
     }
     view.replaceChildren(wrap);
