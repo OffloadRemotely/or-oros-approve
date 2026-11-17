@@ -67,8 +67,8 @@
   var SUPABASE_URL = 'https://lovugfxetgdgxmwxmstz.supabase.co';
   var PUBLISHABLE_KEY = 'sb_publishable_47TrmZCifn0SRtWcTMgQig_tQcPS7h9';
   var LS = 'or_dash_key';
-  var TABS = [['drafts','Drafts'],['approved','Approved'],['scheduled','Scheduled'],['sent','Sent'],['replies','Replies']];
-  var state = { tab: 'drafts', hash: null, data: null, sel: {} };
+  var TABS = [['drafts','Drafts'],['approved','Approved'],['scheduled','Scheduled'],['sent','Sent'],['replies','Replies'],['pipeline','Pipeline']];
+  var state = { tab: 'drafts', hash: null, data: null, sel: {}, pipe: [], pf: 'all' };
   var view = document.getElementById('view');
   var tabsEl = document.getElementById('tabs');
 
@@ -112,7 +112,7 @@
   function renderTabs() {
     tabsEl.replaceChildren();
     TABS.forEach(function (t) {
-      var n = (state.data && state.data.counts && state.data.counts[t[0]]) || 0;
+      var n = t[0] === 'pipeline' ? (state.pipe || []).length : ((state.data && state.data.counts && state.data.counts[t[0]]) || 0);
       var b = el('button', { class: 'tab' + (state.tab === t[0] ? ' on' : ''), type: 'button' }, [document.createTextNode(t[1]), el('b', { text: String(n) })]);
       b.addEventListener('click', function () { state.tab = t[0]; state.sel = {}; render(); });
       tabsEl.appendChild(b);
@@ -208,14 +208,48 @@
   }
   function renderKpis() {
     var box = document.getElementById('kpis'); box.replaceChildren();
-    var s = state.data && state.data.summary; if (!s) return;
+    var sm = state.data && state.data.summary; if (!sm) return;
+    var p = state.pipe || [];
+    var found = p.length;
+    var verified = p.filter(function (r) { return r.verification_status === 'valid'; }).length;
+    var drafted = p.filter(function (r) { return r.has_message; }).length;
     var g = el('div', { class: 'kpis' });
-    [['Found', s.found], ['Verified', s.verified], ['Drafted', s.drafted], ['Sent', s.sent], ['Replies', s.replies]].forEach(function (k) {
-      g.appendChild(el('div', { class: 'kpi' }, [el('div', { class: 'small', text: k[0] }), el('div', { class: 'n', text: String(k[1]) })]));
+    [['Found', found, 'pipeline', 'all'], ['Verified', verified, 'pipeline', 'verified'], ['Drafted', drafted, 'drafts', null], ['Sent', sm.sent, 'sent', null], ['Replies', sm.replies, 'replies', null]].forEach(function (k) {
+      var c = el('div', { class: 'kpi', style: 'cursor:pointer', role: 'button', tabindex: '0' }, [el('div', { class: 'small', text: k[0] + ' ›' }), el('div', { class: 'n', text: String(k[1]) })]);
+      var go = function () { state.tab = k[2]; if (k[3]) state.pf = k[3]; state.sel = {}; render(); };
+      c.addEventListener('click', go); c.addEventListener('keydown', function (e) { if (e.key === 'Enter') go(); });
+      g.appendChild(c);
     });
     box.appendChild(g);
     var need = (state.data.counts.drafts || 0);
-    box.appendChild(el('div', { class: 'small', style: 'margin:6px 0 0', text: need ? need + ' draft' + (need === 1 ? '' : 's') + ' need' + (need === 1 ? 's' : '') + ' you today. Found and Verified count all fresh-batch research and all verified contacts.' : 'Nothing needs you right now.' }));
+    box.appendChild(el('div', { class: 'small', style: 'margin:6px 0 0', text: need ? need + ' draft' + (need === 1 ? '' : 's') + ' need' + (need === 1 ? 's' : '') + ' you today.' : 'Nothing needs you right now.' }));
+  }
+  function stageClass(st) { if (/^Blocked|Rejected/.test(st)) return 'tag bad'; if (/Scheduled|Approved|Sent|Verified/.test(st)) return 'tag ok'; if (/Drafted|Changes/.test(st)) return 'tag info'; return 'tag neutral'; }
+  function pipelineView() {
+    var wrap = el('div');
+    var F = [['all', 'All'], ['needs_email', 'Needs email'], ['needs_verify', 'Needs verifying'], ['verified', 'Verified'], ['blocked', 'Blocked']];
+    var chips = el('div', { class: 'bar' });
+    F.forEach(function (f) { var b = el('button', { class: 'act' + (state.pf === f[0] ? '' : ' ghost'), type: 'button', text: f[1] }); b.addEventListener('click', function () { state.pf = f[0]; render(); }); chips.appendChild(b); });
+    wrap.appendChild(chips);
+    var rows = (state.pipe || []).filter(function (r) {
+      if (state.pf === 'needs_email') return /^Needs/.test(r.stage);
+      if (state.pf === 'needs_verify') return r.stage === 'Email found, needs verifying';
+      if (state.pf === 'verified') return r.verification_status === 'valid';
+      if (state.pf === 'blocked') return /^Blocked|Rejected/.test(r.stage);
+      return true;
+    });
+    if (!rows.length) wrap.appendChild(empty('Nothing in this view.'));
+    rows.forEach(function (r) {
+      var line1 = el('div', {}, [el('span', { class: 'who', text: r.company }), el('span', { class: stageClass(r.stage), text: r.stage })]);
+      var meta = [r.location, r.employee_count ? r.employee_count + ' staff' : null].filter(Boolean).join(' · ');
+      var kids = [line1, el('div', { class: 'small', text: meta })];
+      kids.push(el('div', { class: 'small', text: r.contact ? r.contact + (r.title ? ', ' + r.title : '') + ' · ' + (r.email || 'no email yet') + (r.verification_status ? ' · ' + (r.reoon_status || r.verification_status) : '') : 'No decision-maker yet' }));
+      if (r.hiring_signal) kids.push(el('div', { class: 'small', text: 'Signal: ' + r.hiring_signal }));
+      var links = safeLinks(r.sources);
+      if (links.length) { var ln = el('div', { class: 'small' }, [document.createTextNode('Sources: ')]); links.forEach(function (u, i) { if (i) ln.appendChild(document.createTextNode(' · ')); ln.appendChild(el('a', { href: u, target: '_blank', rel: 'noopener noreferrer', text: host(u) })); }); kids.push(ln); }
+      wrap.appendChild(el('div', { class: 'card' }, kids));
+    });
+    return wrap;
   }
   function renderPause() {
     var box = document.getElementById('pausebox'); box.replaceChildren();
@@ -301,6 +335,8 @@
         var w = 'Planned: ' + fmt(i.scheduled_send_at, i.tz || 'UTC') + ' ' + city(i.tz) + ' time · ' + fmt(i.scheduled_send_at, 'Asia/Karachi') + ' your time (Karachi)';
         wrap.appendChild(card(i, { select: true, when: w, badges: true, why: true, collapse: true, edit: true }));
       });
+    } else if (state.tab === 'pipeline') {
+      wrap.appendChild(pipelineView());
     } else if (state.tab === 'sent') {
       if (!list.length) wrap.appendChild(empty('Nothing sent yet.'));
       list.slice().reverse().forEach(function (i) {
@@ -317,9 +353,10 @@
   }
   async function load() {
     try {
-      var r = await rpc('dash_overview', { p_key_hash: state.hash });
+      var res = await Promise.all([rpc('dash_overview', { p_key_hash: state.hash }), rpc('dash_pipeline', { p_key_hash: state.hash })]);
+      var r = res[0];
       if (!r.ok) { localStorage.removeItem(LS); view.replaceChildren(el('div', { class: 'msg err', text: 'This dashboard link is not valid. Please use your private dashboard link.' })); tabsEl.replaceChildren(); return; }
-      state.data = r; render();
+      state.data = r; state.pipe = (res[1] && res[1].ok) ? res[1].rows : []; render();
     } catch (e) { view.replaceChildren(el('div', { class: 'msg err', text: 'Could not reach the service. Please refresh.' })); }
   }
   async function init() {
